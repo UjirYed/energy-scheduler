@@ -7,3 +7,4 @@ for e in smt pingpong uncore; do python3 -u experiments/phase3.py $e 5; done
 python3 -u experiments/phase4.py collect 3
 python3 -u experiments/phase5.py run 5
 python3 -u experiments/phase3.py efsfix 5
+python3 -u experiments/phase5b.py 5
