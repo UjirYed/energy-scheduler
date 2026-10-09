@@ -217,3 +217,30 @@ Three candidate per-task signals:
 | UMC CAS/ACT | **no**, system-wide per channel | it is the truth for traffic | cannot be split by task |
 
 **Conclusion [measured + inferred]:** memory traffic can be attributed per task (or per group) with MBM. Memory *energy* per task can only be **modeled**: system memory power estimated from UMC counters (validated at the wall to ~5 W), split by MBM byte share, possibly corrected for access pattern using the core DRAM-fill ratio as a randomness proxy. There is **no per-task or per-DIMM ground truth on this machine** (HSMP DIMM power reads 0), so the split cannot be validated directly, only shown consistent in aggregate. For per-thread attribution at context-switch granularity there is no good byte signal. Zen 4's L3 PMU can filter by core/thread and might count L3 misses including prefetches per core; not tested.
+
+## Phase 5 — Actuators (PARTIAL: stopped at ~2 of 5 reps when the node expired)
+
+- **Command:** `sudo python3 experiments/phase5.py run 5` → `data/phase5.csv` (47 rows); summary `python3 experiments/analyze.py phase5` → `data/phase5_summary.csv`.
+- **Design:** fixed work with 8 tasks (burn: 3000 iters each; mem_miss: 200M accesses each; redis: `redis-benchmark -n 4M -c 64 -P 16`, server + 7 client threads). Frequency actuator: HSMP socket boost limit (0x09), since there is no cpufreq. Placement: default CFS vs pinned spread (one per CCX) / pack (2 CCX) / pack_smt (4 cores, both siblings). Energy is the MSR package total over the run plus BMC wall (mean × time). "dyn" = minus idle power measured *at the same cap*.
+- **Idle power depends on the cap [measured, n = 2]:** wall/pkg idle is 223.7/96.8 W at 3800 MHz, 213.6/87.3 at 3000, 207.6/84.6 at 2200 and 201.5/82.7 at 1500. With no OS-visible deep C-states, idle cores sit in shallow idle at boost voltage. **The cap is the only knob seen so far that moves the idle floor (−22 W wall).**
+- **Preliminary results (n = 2, treat as indicative):**
+  - **Frequency (burn):** total package energy for the same work is 1090 J at 3800 MHz, 1189 at 3000 (+9%), 1493 at 2200 (+37%), 2046 at 1500 (+88%). Run time grows to match (9.5 → 24.2 s). **Race-to-idle wins on whole-package energy** because the ~85–97 W floor is paid for longer. Energy *above idle* does drop at low caps (pkg dyn 168 → 44 J). Redis behaves the same way: 683 J at 3800 vs 744 J at 3000 and 1276 J at 1500, with throughput falling proportionally.
+  - **Placement (burn):** spread vs pack across CCXs makes **no significant difference** (1092 vs 1084 vs 1090 J). Packing onto SMT siblings costs +42% energy and is 1.5× slower.
+  - **Redis:** packing onto SMT siblings looks best (2784 krps, 685 J, n = 1) and spreading across CCXs worst (2370 krps, 771 J), consistent with communication locality.
+  - **mem:** runs were too short (~5 s) and n ≤ 2, so the spread is too large to conclude anything; rerun with more work.
+- **The EFS-vs-default comparison was not possible** (no sched_ext on 6.8).
+- **Not run:** `experiments/phase5b.py` (DF P-state via HSMP 0x0D/0x0E, a candidate actuator for the ~87 W SoC floor) and `phase3.py efsfix` (validation of the in-kernel fixed accountant). Both are written and ready.
+
+## STATUS / HANDOFF (2026-10-09 18:48 UTC, node expiring)
+
+**Done:** Phases 1–4 complete (Phase 4 at 3 reps); Phase 5 partial (≈2 reps). All raw data is in `data/`, all scripts in `experiments/`.
+All hardware state was restored before shutdown: HSMP boost limit 3800 MHz, FCLK/MCLK 1800/2400, SMT untouched.
+
+**To resume on a fresh r6615:**
+1. `sudo apt install -y msr-tools ipmitool clang llvm libbpf-dev libelf-dev dwarves stress-ng redis-server redis-tools python3-pandas python3-numpy` (disable the system `redis-server` service if it conflicts; we use port 7777).
+2. `sudo modprobe msr amd_hsmp amd-uncore`; `sudo cp /sys/kernel/btf/vmlinux /usr/lib/modules/$(uname -r)/build/`; `make -C energy_kfunc_module/module && sudo insmod energy_kfunc_module/module/read_core_energy.ko`.
+3. Build tools: `gcc -O2 -o experiments/bin/rapl experiments/rapl.c`; `gcc -O2 -o experiments/bin/burn experiments/workloads/burn.c -lm`; `gcc -O2 -o experiments/bin/mem_miss mem_miss.c`; `gcc -O2 -o experiments/bin/pingpong experiments/workloads/pingpong.c -lm`; `gcc -O2 -o experiments/hsmp experiments/hsmp.c`; `make -C experiments/taskacct` (regenerate `vmlinux.h` with bpftool if the kernel differs).
+4. Next runs, in order: `sudo python3 experiments/phase5.py run 5` (raise `WORK['mem']` ~2× first), `sudo python3 experiments/phase3.py efsfix 5`, `sudo python3 experiments/phase5b.py 5`.
+5. **Decision needed from you:** install a ≥6.12 kernel (apt has `linux-image-6.17.0-42-generic` and HWE 7.0) and reboot, to get sched_ext (EFS comparison) and the `power_core` PMU. Separately, consider BIOS changes (enable C-states/CPPC; "OS DBPM" system profile) to expose cpufreq and deep idle. That changes the whole idle-floor picture.
+
+**Gotchas learned:** `pkill -f <pattern>` matches your own shell when the pattern appears in the command, so use `pkill -f 'name[x]'`. `subprocess.Popen(..., shell=True).terminate()` doesn't kill the child; use list args. BPF ringbuf needs `BPF_RB_NO_WAKEUP` to avoid a self-induced switch storm. mem_miss is ~2.6× faster in fixed-count mode than in timed mode.
