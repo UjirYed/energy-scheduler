@@ -155,3 +155,65 @@ Setup: there is no sched_ext on this kernel, so the EFS hooks cannot run. Instea
 
 ### Fix status
 Fixes are implemented and tested in the offline replay (`phase3.py: smt_aware`), not in `efs.bpf.c`, which cannot be loaded here. They are: per-physical-core attribution split across busy siblings; ≥ 10 ms accumulation window; raw counters with wrap handling; socket-level uncore computed once rather than per task; printk removed from the kfunc. Porting them into `efs.bpf.c` is straightforward, but needs a ≥ 6.12 kernel to test.
+
+## Phase 4 — Attribution signals
+
+### 4.1 Data
+- **Command:** `sudo python3 experiments/phase4.py collect 3` → `data/phase4_seconds.csv` (546 one-second rows). Fit with `python3 experiments/phase4.py fit` → `data/phase4_fit.csv`, `data/phase4_configs.csv`, `data/phase4_fill_coverage.csv`.
+- There are 14 workload configs × 3 reps (3 rather than 5, to fit Phase 5 in the time available) × 16 s, with the first 2 s of each window dropped for BMC lag. Configs: idle; burn 8/32/64; mem_miss random 1 GB 4/16/32/64; mem_miss sequential 8/32; mem_miss random 4 MB (L3-resident) 32; `stress-ng --matrix 32` (AVX-512); `stress-ng --stream 32`; burn 32 on cores 0–31 + mem 32 on their siblings.
+- Each second records: BMC wall W, MSR pkg and Σcore, HSMP socket W and DDR GB/s, perf `instructions`, `cycles`, `ls_any_fills_from_sys.dram_io_all`, **UMC (memory-controller) PMU** CAS read/write and row activations (ACT) summed over all 12 channels (`amd_umc_*`, after `modprobe amd-uncore`), and resctrl MBM total bytes (system-wide and per workload group).
+
+Per-config means (W, GB/s; ACT in M/s):
+
+| config | wall | pkg | Σcore | pkg−Σcore | wall−pkg | UMC GB/s | MBM GB/s | ACT M/s | Ginstr/s |
+|---|---|---|---|---|---|---|---|---|---|
+| idle | 225.2 | 98.7 | 10.3 | 88.4 | 126.5 | 0.2 | 0.2 | 2 | 0.8 |
+| memrand4 | 233.5 | 104.5 | 16.6 | 87.9 | 129.1 | 5.0 | – | 76 | 4.6 |
+| burn8 | 244.5 | 117.5 | 30.4 | 87.2 | 126.9 | 0.3 | – | 3 | 28.9 |
+| memseq8 | 256.8 | 122.9 | 31.3 | 91.5 | 134.0 | 35.4 | – | 371 | 41.2 |
+| memrand16 | 257.4 | 122.5 | 35.4 | 87.1 | 134.9 | 18.9 | – | 294 | 15.1 |
+| memrand32 | 289.0 | 146.1 | 58.6 | 87.5 | 142.9 | 37.6 | 37.2 | 586 | 29.1 |
+| burn32 | 301.8 | 171.7 | 88.4 | 83.3 | 130.1 | 0.3 | 0.3 | 3 | 112.7 |
+| memrand64 | 317.2 | 167.0 | 67.7 | 99.3 | 150.2 | 66.7 | 66.2 | 1040 | 49.2 |
+| meml3_32 | 327.3 | 191.4 | 101.1 | 90.3 | 135.9 | 6.2 | 3.0 | 84 | 137.5 |
+| burn64 | 331.3 | 197.8 | 117.5 | 80.2 | 133.5 | 0.4 | 0.4 | 4 | 150.4 |
+| memseq32 | 339.6 | 190.4 | 92.4 | 98.0 | 149.2 | 85.2 | 84.7 | 690 | 165.1 |
+| mix burn32+mem32 | 343.2 | 196.5 | 96.1 | 100.4 | 146.6 | 36.0 | 35.5 | 561 | 139.3 |
+| stream32 | 381.4 | 205.3 | 81.4 | 124.0 | 176.0 | 321.1 | 319.1 | 3492 | 61.0 |
+| matrix32 | 387.6 | 247.7 | 178.4 | 69.3 | 139.8 | 0.4 | 0.4 | 4 | 211.1 |
+
+(MBM "–": the per-group/total MBM reads intermittently failed for some runs, giving NaN. UMC CAS is the primary memory signal.)
+
+### 4.2 How much memory power is there? [measured]
+- At full bandwidth (STREAM, 321 GB/s), memory activity adds about **+36 W inside the package** (pkg−Σcore 88 → 124 W) **and about +50 W outside it** (wall−pkg 126 → 176 W), i.e. ~22% of wall power. At the moderate bandwidths of `mem_miss` (≤ 67 GB/s) the package term barely moves (≤ +11 W) while wall−pkg rises 16–24 W.
+- **Access pattern matters beyond bytes:** memseq8 (35.4 GB/s, 371 M ACT/s) costs wall−pkg 134.0 W, while memrand32 (37.6 GB/s, 586 M ACT/s) costs 142.9 W. Roughly 8 W of that gap is not explained by bandwidth and tracks row activations (VR loss on the 23 W package difference accounts for ~1–2 W of it) **[inferred]**. DRAM energy is ACT-heavy for random access, as standard DRAM power models predict.
+
+### 4.3 How much of wall power does each signal set explain? (leave-one-config-out CV, per-second rows)
+
+| model (features) | CV R² for wall W | CV RMSE W | CV R² for wall−pkg W |
+|---|---|---|---|
+| Σcore only | 0.707 | 27.7 | −0.19 |
+| pkg only | 0.937 | 12.8 | (n/a) |
+| HSMP socket only | 0.938 | 12.7 | −0.01 |
+| pkg + UMC CAS GB/s | 0.964 | 9.6 | – |
+| pkg + MBM GB/s | 0.930 | 11.7 | – |
+| PMCs only (instr, cycles, DRAM fills) | 0.970 | 8.9 | 0.843 |
+| Σcore + (pkg−Σcore) | 0.983 | 6.7 | 0.723 |
+| + UMC rd/wr/ACT | 0.991 | 4.9 | 0.849 |
+| + instructions, cycles | **0.996** | **3.3** | **0.932** |
+
+Conclusions:
+- **Per-core RAPL misses a lot [measured]:** Σcore alone explains only 71% of wall-power variance across workloads (28 W error). Package-only signals (pkg, HSMP) explain **none** of the variation in non-package power out of sample (CV R² ≈ 0).
+- **Memory-controller and core PMCs recover most of the missing variance [measured]:** adding UMC rd/wr/ACT and instructions/cycles cuts the out-of-sample wall error from 12.8 W (pkg) to **3.3 W**, and explains **93%** of non-package power variance. This is the answer to "do these explain variation that per-core RAPL misses": **yes, substantially, at the system level and at ≥ 1 s granularity.**
+- Caveats: only 14 configs (42 runs), and the coefficients are collinear (individual UMC coefficients flip sign between models), so treat the *fit quality* as the finding, not the coefficients. The wall reference is the BMC (1 Hz, whole watts). Fans and PSU behavior are in the residual.
+
+### 4.4 Can memory energy be attributed **per task**?
+Three candidate per-task signals:
+
+| signal | per-task? | fidelity vs memory-controller truth | limits |
+|---|---|---|---|
+| core PMC `ls_any_fills_from_sys.dram_io_all` read at context switch (BPF) | yes, every switch | **pattern-dependent: 50% of UMC reads for random, 28% for STREAM, 0–1% for sequential** (L2 prefetcher fills are not L1D fills), see `data/phase4_fill_coverage.csv` | unusable as a byte count; usable only as a "random-miss intensity" feature |
+| resctrl MBM per monitoring group | per group of tasks (RMID assigned on context switch by hardware) | tracks UMC CAS within ~1% at ≥35 GB/s; mix run: burn group 0.06 GB/s, mem group 35.1 GB/s | 256 RMIDs; sysfs reads (no BPF access); intermittent read failures here; L3-egress bytes, no row-activation information |
+| UMC CAS/ACT | **no**, system-wide per channel | it is the truth for traffic | cannot be split by task |
+
+**Conclusion [measured + inferred]:** memory traffic can be attributed per task (or per group) with MBM. Memory *energy* per task can only be **modeled**: system memory power estimated from UMC counters (validated at the wall to ~5 W), split by MBM byte share, possibly corrected for access pattern using the core DRAM-fill ratio as a randomness proxy. There is **no per-task or per-DIMM ground truth on this machine** (HSMP DIMM power reads 0), so the split cannot be validated directly, only shown consistent in aggregate. For per-thread attribution at context-switch granularity there is no good byte signal. Zen 4's L3 PMU can filter by core/thread and might count L3 misses including prefetches per core; not tested.

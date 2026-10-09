@@ -149,6 +149,8 @@ def fit():
                 out.append(dict(level=level, target=target, model=name, n=len(Z), r2=r2, cv_r2=cv_r2, cv_rmse_W=rmse,
                                 coef=' '.join(f'{c}={v:.3g}' for c, v in zip(['b0'] + cols, coef))))
     o = pd.DataFrame(out); o.to_csv(os.path.join(DATA, 'phase4_fit.csv'), index=False)
+    cov = d.groupby('config')[['fill_GBs', 'rd_GBs', 'cas_GBs', 'mbm_GBs']].mean(); cov['fill_over_rd'] = cov.fill_GBs / cov.rd_GBs
+    cov.round(3).to_csv(os.path.join(DATA, 'phase4_fill_coverage.csv')); print(cov.round(2).to_string())
     print(o.drop(columns='coef').to_string(index=False, float_format=lambda v: f'{v:.3f}'))
     print(o[['level', 'target', 'model', 'coef']].to_string(index=False))
     cfgs = agg.groupby('config')[['bmc_W', 'pkg_W', 'sumcore_W', 'uncore_W', 'nonpkg_W', 'cas_GBs', 'mbm_GBs', 'hsmp_ddr_GBs', 'act_M', 'ginstr']].agg(['mean', 'std'])

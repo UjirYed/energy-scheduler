@@ -70,4 +70,35 @@ def phase3():
         u = u[['rep', 'n', 'efs_uncore_W', 'ref_uncore_W_phase2', 'overcount_x', 'events']]
         print('\n### EFS-style uncore vs true pkg - sum(core)\n' + table(u, 'n', ['efs_uncore_W', 'ref_uncore_W_phase2', 'overcount_x', 'events']))
 
+
+def phase5():
+    d = pd.read_csv(f'{D}/phase5.csv')
+    idle = d[d.workload == 'idle'].groupby('mhz')[['bmc_meanW', 'pkg_J', 'elapsed_s']].mean()
+    idle_w = (idle.bmc_meanW).to_dict(); idle_pkg_w = (idle.pkg_J / idle.elapsed_s).to_dict()
+    print('idle power by cap (MHz -> wall W, pkg W):', {k: (round(idle_w[k], 1), round(idle_pkg_w[k], 1)) for k in idle_w})
+    w = d[d.workload.isin(['burn', 'mem', 'redis'])].copy()
+    w['cfg'] = w.placement + '@' + w.mhz.astype(str)
+    w['bmc_dyn_J'] = w.bmc_J - w.mhz.map(idle_w) * w.elapsed_s
+    w['pkg_dyn_J'] = w.pkg_J - w.mhz.map(idle_pkg_w) * w.elapsed_s
+    rows = []
+    for wl, g in w.groupby('workload'):
+        base = g[g.cfg == 'default@3800']
+        b = {c: base[c].mean() for c in ('elapsed_s', 'pkg_J', 'bmc_J', 'bmc_dyn_J', 'pkg_dyn_J', 'perf')}
+        for cfg, x in g.groupby('cfg', sort=False):
+            r = dict(workload=wl, cfg=cfg, n=len(x))
+            for c in ('elapsed_s', 'pkg_J', 'bmc_J', 'bmc_dyn_J', 'pkg_dyn_J'):
+                r[c] = f'{x[c].mean():.1f} ± {x[c].std():.1f}'
+                r[c + '_rel'] = f'{100 * (x[c].mean() / b[c] - 1):+.1f}%'
+            r['cv_bmc_J'] = f'{100 * x.bmc_J.std() / x.bmc_J.mean():.1f}%'
+            # significant vs baseline? (difference > 2 * pooled sd)
+            sd = np.sqrt((x.bmc_J.var() + base.bmc_J.var()) / 2)
+            r['bmc_sig'] = 'yes' if abs(x.bmc_J.mean() - b['bmc_J']) > 2 * sd else 'no'
+            sdp = np.sqrt((x.pkg_J.var() + base.pkg_J.var()) / 2)
+            r['pkg_sig'] = 'yes' if abs(x.pkg_J.mean() - b['pkg_J']) > 2 * sdp else 'no'
+            if wl == 'redis': r['krps'] = f'{x.perf.mean() / 1e3:.0f} ± {x.perf.std() / 1e3:.0f}'
+            rows.append(r)
+    o = pd.DataFrame(rows); o.to_csv(f'{D}/phase5_summary.csv', index=False)
+    print('| ' + ' | '.join(o.columns) + ' |\n|' + '---|' * len(o.columns))
+    for _, r in o.iterrows(): print('| ' + ' | '.join(str(v) for v in r.values) + ' |')
+
 if __name__ == '__main__': globals()[sys.argv[1]]()
