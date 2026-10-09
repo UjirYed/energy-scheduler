@@ -45,6 +45,7 @@ def collect(reps, secs=16, warm=4):
     rows = []
     for rep in range(reps):
         order = list(CONFIGS); random.seed(100 + rep); random.shuffle(order)
+        if os.environ.get('ONLY'): order = os.environ['ONLY'].split(',')
         for name in order:
             time.sleep(3)
             procs = []
@@ -108,3 +109,50 @@ def collect(reps, secs=16, warm=4):
 
 if __name__ == '__main__':
     if sys.argv[1] == 'collect': collect(int(sys.argv[2]) if len(sys.argv) > 2 else 3)
+
+def fit():
+    d = pd.read_csv(os.path.join(DATA, 'phase4_seconds.csv'))
+    d = d[d.sec >= 3].copy()  # drop first 2 s of each window (BMC lag <= ~1.1 s)
+    d['cas_GBs'] = (d.umc_rd + d.umc_wr) * 64 / 1e9
+    d['rd_GBs'] = d.umc_rd * 64 / 1e9; d['wr_GBs'] = d.umc_wr * 64 / 1e9
+    d['act_M'] = d.umc_all / 1e6 if 'umc_all' in d else np.nan
+    d['ginstr'] = d.instructions / 1e9; d['gcyc'] = d.cycles / 1e9; d['fill_GBs'] = d['ls_any_fills_from_sys.dram_io_all'] * 64 / 1e9
+    d['uncore_W'] = d.pkg_W - d.sumcore_W; d['nonpkg_W'] = d.bmc_W - d.pkg_W
+    agg = d.groupby(['rep', 'config']).mean(numeric_only=True).reset_index()
+    models = {
+        'pkg': ['pkg_W'],
+        'sumcore': ['sumcore_W'],
+        'hsmp': ['hsmp_W'],
+        'core+uncore': ['sumcore_W', 'uncore_W'],
+        'core+uncore+umc': ['sumcore_W', 'uncore_W', 'rd_GBs', 'wr_GBs', 'act_M'],
+        'core+uncore+umc+pmc': ['sumcore_W', 'uncore_W', 'rd_GBs', 'wr_GBs', 'act_M', 'ginstr', 'gcyc'],
+        'pkg+mbm': ['pkg_W', 'mbm_GBs'],
+        'pkg+cas': ['pkg_W', 'cas_GBs'],
+        'pmc only': ['ginstr', 'gcyc', 'fill_GBs'],
+    }
+    out = []
+    for level, X in (('per-second', d), ('per-run mean', agg)):
+        for target in ('bmc_W', 'nonpkg_W'):
+            Xd = X.dropna(subset=[target])
+            ss = ((Xd[target] - Xd[target].mean()) ** 2).sum()
+            for name, cols in models.items():
+                if target == 'nonpkg_W' and 'pkg_W' in cols: continue
+                Z = Xd.dropna(subset=cols)
+                A = np.c_[np.ones(len(Z)), Z[cols].values]; y = Z[target].values
+                coef, *_ = np.linalg.lstsq(A, y, rcond=None); r2 = 1 - ((y - A @ coef) ** 2).sum() / ((y - y.mean()) ** 2).sum()
+                # leave-one-config-out CV
+                pred = np.full(len(Z), np.nan)
+                for cfg in Z.config.unique():
+                    tr = (Z.config != cfg).values
+                    c2, *_ = np.linalg.lstsq(A[tr], y[tr], rcond=None); pred[~tr] = A[~tr] @ c2
+                cv_r2 = 1 - ((y - pred) ** 2).sum() / ((y - y.mean()) ** 2).sum(); rmse = np.sqrt(np.mean((y - pred) ** 2))
+                out.append(dict(level=level, target=target, model=name, n=len(Z), r2=r2, cv_r2=cv_r2, cv_rmse_W=rmse,
+                                coef=' '.join(f'{c}={v:.3g}' for c, v in zip(['b0'] + cols, coef))))
+    o = pd.DataFrame(out); o.to_csv(os.path.join(DATA, 'phase4_fit.csv'), index=False)
+    print(o.drop(columns='coef').to_string(index=False, float_format=lambda v: f'{v:.3f}'))
+    print(o[['level', 'target', 'model', 'coef']].to_string(index=False))
+    cfgs = agg.groupby('config')[['bmc_W', 'pkg_W', 'sumcore_W', 'uncore_W', 'nonpkg_W', 'cas_GBs', 'mbm_GBs', 'hsmp_ddr_GBs', 'act_M', 'ginstr']].agg(['mean', 'std'])
+    print(cfgs.round(2).to_string())
+    cfgs.round(3).to_csv(os.path.join(DATA, 'phase4_configs.csv'))
+
+if __name__ == '__main__' and sys.argv[1] == 'fit': fit()

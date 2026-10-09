@@ -22,11 +22,14 @@ def phase2():
         d = pd.read_csv(f'{D}/phase2_bmcrate.csv'); s = d[d.kind == 'sample']
         for rep, g in s.groupby('rep'):
             ch = g[g.watts.diff() != 0].t.values[1:]; gaps = np.diff(ch)
+            e = d[(d.kind == 'edge') & (d.rep == rep)].t.values; lo, hi = g.watts.quantile(0.1), g.watts.quantile(0.9)
+            lags = [a.t.iloc[0] - t for t in e for a in [g[(g.t > t) & (g.t < t + 3) & (g.watts > (lo + hi) / 2)]] if len(a)]
+            print(f'bmcrate rep {rep}: low {lo:.0f} W high {hi:.0f} W, rise lag to 50%: median {np.median(lags):.2f}s max {max(lags):.2f}s')
             print(f'bmcrate rep {rep}: samples {len(g)}, value changes {len(ch)}, median gap between changes {np.median(gaps):.3f}s, p10 {np.percentile(gaps,10):.3f} p90 {np.percentile(gaps,90):.3f}')
     if os.path.exists(f'{D}/phase2_sumpkg.csv'):
         d = pd.read_csv(f'{D}/phase2_sumpkg.csv'); d['cfg'] = d.workload + d.n.astype(str)
-        d['core_frac_of_pkg'] = d.sumcore_W / d.pkg_W
-        print('\n### sum-of-cores vs package\n' + table(d.sort_values(['workload', 'n']), 'cfg', ['pkg_W', 'sumcore_W', 'uncore_W', 'sum64_W', 'hsmp_W', 'bmc_W', 'ddr_GBs', 'busy_mhz']))
+        d['core_frac_of_pkg'] = d.sumcore_W / d.pkg_W; d['bmc_minus_pkg_W'] = d.bmc_W - d.pkg_W
+        print('\n### sum-of-cores vs package\n' + table(d.sort_values(['workload', 'n']), 'cfg', ['pkg_W', 'sumcore_W', 'uncore_W', 'sum64_W', 'hsmp_W', 'bmc_W', 'bmc_minus_pkg_W', 'ddr_GBs', 'throughput']))
         # slopes: uncore vs ddr bandwidth, bmc-pkg vs ddr
         for name, sub in (('all', d), ('mem only', d[d.workload != 'burn'])):
             for y in ('uncore_W', 'bmc_W'):

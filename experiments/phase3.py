@@ -58,8 +58,8 @@ def smt_aware(iv, cpus_of_core, p_idle_thread):
             ov = (np.minimum(x.t1.values, b) - np.maximum(x.t0.values, a)).clip(0) / 1e9
             sel = ov > 0
             if not sel.any(): continue
-            w = pd.Series(ov[sel], index=x.comm.values[sel]).groupby(level=0).sum()
-            idle_t = w.pop('swapper/%d' % cpus[0], 0) + w.pop('swapper/%d' % cpus[1], 0) if len(cpus) > 1 else w.pop('swapper/%d' % cpus[0], 0)
+            w = pd.Series(ov[sel], index=x.comm.values[sel]).groupby(level=0).sum().to_dict()
+            idle_t = sum(w.pop('swapper/%d' % c, 0) for c in cpus); w = pd.Series(w, dtype=float)
             e = max(0.0, Ew[k] - p_idle_thread * idle_t)
             if w.sum() > 0:
                 for c, v in (w / w.sum() * e).items(): res[c] = res.get(c, 0) + v

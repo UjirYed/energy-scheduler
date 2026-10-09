@@ -18,7 +18,7 @@ PLACE = {
     'pack_ccx':   list(range(8)),                     # 8 cores on 2 CCX
     'pack_smt':   [0, 1, 2, 3, 32, 33, 34, 35],       # 4 physical cores, both siblings, 1 CCX
 }
-WORK = {'burn': 3000, 'mem': 60_000_000}            # per task; ~8-10 s at default settings
+WORK = {'burn': 3000, 'mem': 200_000_000}            # per task; ~8-10 s at default settings
 
 def set_freq(mhz):
     hsmp(0x09, [mhz], 0)
@@ -28,7 +28,9 @@ def run_once(wl, place, mhz):
     t0 = time.monotonic()
     bmc = Poller(bmc_watts, 0.25); bmc.start()
     procs = []
-    if wl in ('burn', 'mem'):
+    if wl == 'idle':
+        time.sleep(10); outs, perf = [], None
+    elif wl in ('burn', 'mem'):
         for i in range(N):
             cmd = [f'{BIN}/burn', '0', str(WORK['burn'])] if wl == 'burn' else \
                   [f'{BIN}/mem_miss', '1024', '1024', str(WORK['mem']), '1', '64', '50', '0']
@@ -53,7 +55,7 @@ def measure(wl, place, mhz):
     """Run once and return energy over exactly the run span using a pkg-energy series."""
     # pkg energy: sample counter before/after with rapl series in background at 100 ms
     set_freq(mhz); time.sleep(1.0)
-    rs = subprocess.Popen(f'{BIN}/rapl series 600 100 0', shell=True, stdout=subprocess.PIPE, text=True)
+    rs = subprocess.Popen([f'{BIN}/rapl', 'series', '600', '100', '0'], stdout=subprocess.PIPE, text=True)
     time.sleep(0.3)
     t0, t1, outs, perf, bmc = run_once(wl, place, mhz)
     time.sleep(0.15)
@@ -77,6 +79,7 @@ def run(reps, wls):
     for wl in wls:
         for mhz in (3800, 3000, 2200, 1500): configs.append((wl, 'default', mhz))
         for place in ('spread_ccx', 'pack_ccx', 'pack_smt'): configs.append((wl, place, FMAX))
+    for mhz in (3800, 3000, 2200, 1500): configs.append(('idle', 'default', mhz))  # idle power under each cap
     try:
         for rep in range(reps):
             ip, iw = idle_baseline()
