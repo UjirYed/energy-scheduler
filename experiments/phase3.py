@@ -139,5 +139,35 @@ def exp_uncore(reps, secs=6):
             os.remove(path)
     pd.DataFrame(rows).to_csv(os.path.join(DATA, 'phase3_uncore.csv'), index=False)
 
+def exp_efsfix(reps, secs=8):
+    """Validate the in-kernel fixed accountant (bin/efsfix): attributed task energy vs core counters, and overhead."""
+    rows = []
+    for rep in range(reps):
+        for scen in ('smt_pair', 'mix16', 'pp_overhead_off', 'pp_overhead_on'):
+            time.sleep(2)
+            if scen == 'smt_pair':
+                procs = launch('burn', [2], secs + 4) + launch('mem', [34], secs + 4, ['1024', '1024', '0', '1', '64', '50']); cores = [2]
+            elif scen == 'mix16':
+                procs = launch('burn', list(range(0, 8)), secs + 4) + launch('mem', list(range(32, 40)), secs + 4, ['1024', '1024', '0', '1', '64', '50']); cores = list(range(8))
+            else:
+                procs = [subprocess.Popen(['taskset', '-c', '6', f'{BIN}/pingpong', '20', str(secs + 1)], stdout=subprocess.PIPE, text=True)]; cores = [6]
+            time.sleep(1.0)
+            path = '/tmp/efsfix.csv'
+            ef = subprocess.Popen([f'{BIN}/efsfix', str(secs), path]) if scen != 'pp_overhead_off' else None
+            r = rapl_window(secs)
+            if ef: ef.wait()
+            outs = wait_all(procs)
+            row = dict(rep=rep, scen=scen, counter_J=sum(r['core_J'][c] for c in cores), secs=r['secs'])
+            if scen.startswith('pp'):
+                row['turns_per_s'] = sum(int(l.split()[1]) for o in outs for l in o.splitlines() if 'turns' in l) / (secs + 1)
+            if ef:
+                t = pd.read_csv(path); t = t[t.comm.isin(['burn', 'mem_miss', 'pp_cpu', 'pp_mem'])]
+                row.update(attributed_J=t.energy_J.sum(), burn_J=t[t.comm == 'burn'].energy_J.sum(), mem_J=t[t.comm == 'mem_miss'].energy_J.sum(),
+                           burn_dram=t[t.comm == 'burn'].dram_fills.sum(), mem_dram=t[t.comm == 'mem_miss'].dram_fills.sum(),
+                           tasks_runtime_s=t.runtime_s.sum(), idle_baseline_J=0.21 * len(cores) * r['secs'])
+                row['attributed_over_counter'] = row['attributed_J'] / max(1e-9, row['counter_J'])  # both siblings busy in smt_pair/mix16, so no idle share
+            rows.append(row); print({k: (round(v, 3) if isinstance(v, float) else v) for k, v in row.items()}, flush=True)
+    pd.DataFrame(rows).to_csv(os.path.join(DATA, 'phase3_efsfix.csv'), index=False)
+
 if __name__ == '__main__':
     globals()['exp_' + sys.argv[1]](int(sys.argv[2]) if len(sys.argv) > 2 else 5)

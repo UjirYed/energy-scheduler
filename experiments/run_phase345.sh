@@ -6,3 +6,4 @@ lsmod | grep -q read_core_energy || insmod energy_kfunc_module/module/read_core_
 for e in smt pingpong uncore; do python3 -u experiments/phase3.py $e 5; done
 python3 -u experiments/phase4.py collect 3
 python3 -u experiments/phase5.py run 5
+python3 -u experiments/phase3.py efsfix 5
