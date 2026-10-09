@@ -125,8 +125,14 @@ def exp_uncore(reps, secs=6):
             df = load(path); iv = intervals(df)
             dur = (df.ts_ns.max() - df.ts_ns.min()) / 1e9
             efs = (iv[iv.pid != 0].dPkg - iv[iv.pid != 0].dE).clip(lower=0).sum()
-            pk = df.sort_values('ts_ns'); pkgJ = ((np.diff(pk.pkg_raw.values) % 2**32) * UNIT).sum()
-            coreJ = sum(iv[iv.cpu == c].dE.sum() for c in range(32))
+            # pkg: last - first reading (no wrap possible in 6 s). Summing diffs of the merged multi-CPU stream is
+            # wrong because reads from different CPUs at ~the same instant can be slightly out of order.
+            pk = df.sort_values('ts_ns'); pkgJ = ((int(pk.pkg_raw.values[-1]) - int(pk.pkg_raw.values[0])) % 2**32) * UNIT
+            # cores: per-CPU first..last delta, scaled to the full duration (a busy CPU may have few switch events)
+            coreJ = 0
+            for c in range(32):
+                g = df[df.cpu == c]
+                if len(g) > 1: coreJ += ((int(g.core_raw.values[-1]) - int(g.core_raw.values[0])) % 2**32) * UNIT * dur / max(1e-9, (g.ts_ns.values[-1] - g.ts_ns.values[0]) / 1e9)
             rows.append(dict(rep=rep, n=n, dur_s=dur, events=len(df), efs_uncore_W=efs / dur, true_uncore_W=(pkgJ - coreJ) / dur,
                              pkg_W=pkgJ / dur, sumcore_W=coreJ / dur, ratio=efs / max(1e-9, pkgJ - coreJ)))
             print({k: round(v, 3) for k, v in rows[-1].items()})

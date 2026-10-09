@@ -47,7 +47,7 @@ int main(int argc, char **argv) {
 	fprintf(out, "ts_ns,cpu,prev_pid,next_pid,prev_state,core_raw,pkg_raw,instr,cycles,dram_fills,prev_comm\n");
 	if (taskacct_bpf__attach(skel)) { fprintf(stderr, "attach failed\n"); return 1; }
 	struct timespec t0, t; clock_gettime(CLOCK_MONOTONIC, &t0);
-	do { ring_buffer__poll(rb, 100); clock_gettime(CLOCK_MONOTONIC, &t); }
+	do { usleep(20000); ring_buffer__consume(rb); clock_gettime(CLOCK_MONOTONIC, &t); }
 	while ((t.tv_sec - t0.tv_sec) + (t.tv_nsec - t0.tv_nsec) / 1e9 < secs);
 	taskacct_bpf__detach(skel);
 	ring_buffer__consume(rb);

@@ -48,7 +48,7 @@ int BPF_PROG(on_switch, bool preempt, struct task_struct *prev, struct task_stru
 	e->cycles = rd(&ev_cycles);
 	e->dram = rd(&ev_dram);
 	__builtin_memcpy(e->prev_comm, prev->comm, 16);
-	bpf_ringbuf_submit(e, 0);
+	bpf_ringbuf_submit(e, BPF_RB_NO_WAKEUP); // consumer polls on a timeout; waking it per event caused a self-sustaining switch storm
 	return 0;
 }
 

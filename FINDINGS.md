@@ -110,3 +110,48 @@ Tools: `experiments/bin/rapl` (built from `experiments/rapl.c`) reads the MSRs t
 
 ### 2.7 Per-DIMM power via HSMP
 `experiments/hsmp 0x17 <addr>` returns 0 for every address 0–255 at idle. A recheck under 64× `mem_miss` is scheduled in Phase 4's notes. **[measured at idle]** On this platform the SMU is not fed DIMM PMIC telemetry, so per-DIMM power via HSMP is unavailable.
+
+## Phase 3 — Accounting problems the data shows
+
+Setup: there is no sched_ext on this kernel, so the EFS hooks cannot run. Instead `experiments/taskacct/` is a `tp_btf/sched_switch` BPF program that, on every context switch, calls a new kfunc `read_energy_raw()` (added to `energy_kfunc_module` and registered for TRACING as well as STRUCT_OPS) and reads per-CPU instructions, cycles and DRAM fills (`ls_any_fills_from_sys.dram_io_all`, raw 0x4844). The resulting trace (`data/traces/*.csv.gz`) is replayed offline in `experiments/phase3.py`, both with the exact arithmetic of `efs.bpf.c` (`sched_running`/`sched_stopping`) and with fixed variants. `python3 experiments/analyze.py phase3` regenerates the tables. There are 5 reps each.
+
+### 3.1 SMT siblings double-charge the shared core counter
+- **Command:** `sudo python3 experiments/phase3.py smt 5`. `burn` runs on cpu 2 and `mem_miss` on its sibling cpu 34 for 8 s; references are `burn` alone on core 3 and `mem_miss` alone on core 4.
+- **Result:** core-2 counter 21.45 ± 0.93 J. EFS-style per-interval charging gives burn 21.45 J + mem 21.57 J = **2.01 ± 0.04 × the energy the core actually used**. The SMT-aware replay (energy between counter reads on either sibling split by run time across both siblings, ≥10 ms windows) sums to 1.00 × the counter (burn 10.90, mem 10.55 J). Alone, the two tasks would have used 18.71 + 13.73 J = 1.51 × the shared figure.
+- **Conclusion [measured]:** this is a real bug: with SMT on and both siblings busy, every task's energy is doubled. The fix (split per *physical* core across the busy siblings) removes it exactly. How to split the shared energy "fairly" between siblings is a modeling choice. By run time, burn and mem get ~50/50. By standalone power, they would get 58/42. Nothing on this machine can measure which split is right. **[inferred]**
+
+### 3.2 Sub-millisecond run intervals: quantization and blur
+- **Command:** `sudo python3 experiments/phase3.py pingpong 5`. `experiments/workloads/pingpong.c` has two processes pinned to cpu 6 hand a token back and forth: `pp_cpu` (sqrt loop) and `pp_mem` (random 1 GB accesses) each work `work_us` per turn. The reference power per task comes from the 20 ms-turn run: pp_cpu 2.741 W, pp_mem 2.380 W.
+
+| work_us | mean interval µs | intervals with dE=0 | naive pp_cpu W | naive pp_mem W | pp_cpu error | pp_mem error | equal-power split error (cpu) |
+|---|---|---|---|---|---|---|---|
+| 20000 | 6542 | 32% | 2.74 | 2.38 | 0.0% (ref) | 0.0% (ref) | −6.6% |
+| 1000 | 1006 | 0% | 2.53 | 2.60 | −7.6 ± 0.1% | +9.3 ± 0.1% | −6.4% |
+| 200 | 208 | 79% | 2.59 | 2.60 | −5.7 ± 1.3% | +9.4 ± 1.4% | −5.3% |
+| 50 | 57 | 94% | 2.67 | 2.68 | −2.6 ± 0.6% | +12.6 ± 0.6% | −2.4% |
+
+- **Conclusion [measured]:** once intervals are ≤ 1 ms, the EFS per-interval delta can no longer tell the tasks apart. Both converge to the time-weighted mean (~2.6 W), and the result is no better than ignoring energy and splitting by run time. At 200/50 µs, 79–94% of intervals see no counter change at all, so `efs.bpf.c`'s `if (*prev_energy == cur_energy) return;` skips them and their per-interval "power" (the EMA input) is 0 or a full 1 ms of energy, i.e. noise. Because energy is conserved on average, totals stay roughly right; what disappears is the per-task discrimination. A minimum accumulation window (≥ 10 ms) removes the noise but cannot recover the discrimination; that needs a per-task activity model (Phase 4). Note how small the signal is: a compute-bound and a memory-bound task differ by only ~15% in core power (2.74 vs 2.38 W).
+
+### 3.3 The "uncore" accumulator in efs.bpf.c over-counts by the number of running tasks
+- **Command:** `sudo python3 experiments/phase3.py uncore 5`. n `burn` tasks for 6 s, with the `sched_stopping` uncore arithmetic replayed: for every non-idle interval, add `max(0, Δpkg − Δcore)`. The reference is pkg − Σcore from Phase 2 windows at the same n.
+
+| n tasks | EFS-style "uncore" W | reference pkg−Σcore W | over-count |
+|---|---|---|---|
+| 0 | 58.5 ± 2.5 | 87.5 | 0.67× |
+| 1 | 157.8 ± 1.8 | 87.7 | 1.8× |
+| 8 | 706.9 ± 205 | 86.4 | 8.2× |
+| 32 | 4427 ± 107 | 82.7 | 53.5× |
+| 64 | 9404 ± 228 | 78.1 | 120× |
+
+- **Conclusion [measured]:** this is a real bug. Δpkg is socket-wide, so every concurrently running task's interval adds the *whole* package delta again. The accumulator therefore grows at ≈ (number of running tasks) × (package power), which is dominated by the constant ~87 W SoC floor. With a fixed workload its rate is constant whatever the memory activity, which is exactly the "uncore rises at a constant rate regardless of workload" symptom from the first attempt. The fix is to compute pkg − Σcore once per socket on a timer (or in userspace from one counter), never per task interval. Even the correct value is flat (Phase 2.6), so the bug masked a signal that is not there anyway.
+- Caveat: the trace-based truth columns in `data/phase3_uncore.csv` (`true_uncore_W`, `pkg_W`, `ratio`) are **wrong**. They summed diffs over a stream merged from many CPUs, where near-simultaneous reads arrive out of order. The script is now fixed (last − first), and the table uses the Phase 2 reference instead.
+- Caveat: the first tracer version woke its userspace reader on every event, which created a self-sustaining ~230k switches/s storm (1.4 M events in 6 s at "idle"). That inflates the n = 0 row. The tracer now uses `BPF_RB_NO_WAKEUP` with a 20 ms timed consume. Phase 3.1/3.2 results are per-CPU and unaffected.
+
+### 3.4 Other defects found by reading the code (not separately measured)
+- `read_core_energy()` called `pr_info` twice per invocation, i.e. twice per context switch in EFS, which floods the kernel log and adds overhead to every switch. **Removed.**
+- There is no 32-bit wrap handling: µJ values derived from a 32-bit counter wrap at 65.5 kJ (the package counter wraps every 3.6–11 min at 100–300 W), producing a huge `u64` delta on wrap. The new `read_energy_raw()` returns raw 32-bit values so callers can use `(u32)(cur − prev)`.
+- The EMA (α = ½) is applied to per-interval power whose inputs are quantized to 1 ms of energy (3.2). It cannot settle for tasks with short intervals, which plausibly explains TODO #1 in the README ("rolling pid_to_power keeps increasing") **[inferred]**.
+- Kernel-thread intervals are skipped (`PF_KTHREAD`), so their energy goes to no one; idle intervals are likewise dropped. That is fine for ordering decisions, but per-task sums will not add up to the counter.
+
+### Fix status
+Fixes are implemented and tested in the offline replay (`phase3.py: smt_aware`), not in `efs.bpf.c`, which cannot be loaded here. They are: per-physical-core attribution split across busy siblings; ≥ 10 ms accumulation window; raw counters with wrap handling; socket-level uncore computed once rather than per task; printk removed from the kfunc. Porting them into `efs.bpf.c` is straightforward, but needs a ≥ 6.12 kernel to test.

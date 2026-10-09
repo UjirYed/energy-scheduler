@@ -39,4 +39,35 @@ def phase2():
             A = np.c_[np.ones(len(sub2)), sub2.ddr_GBs]; c, *_ = np.linalg.lstsq(A, sub2.nonpkg, rcond=None)
             print(f'fit {name}: (bmc - pkg) = {c[0]:.2f} + {c[1]:.3f} * ddr_GBs')
 
+
+def phase3():
+    d = pd.read_csv(f'{D}/phase3_smt.csv')
+    d['naive_over_counter'] = d.naive_sum_tasks_core2_J / d.core2_counter_J
+    d['smtaware_over_counter'] = (d.smtaware_burn_J + d.smtaware_mem_J) / d.core2_counter_J
+    d['alone_sum_over_shared'] = (d.ref_burn_alone_J + d.ref_mem_alone_J) / d.core2_counter_J
+    print('### SMT pair (burn cpu2 + mem cpu34)\n' + table(d.assign(x='pair'), 'x', ['core2_counter_J', 'naive_burn_J', 'naive_mem_J', 'naive_over_counter', 'smtaware_burn_J', 'smtaware_mem_J', 'smtaware_over_counter', 'ref_burn_alone_J', 'ref_mem_alone_J', 'alone_sum_over_shared']))
+    if os.path.exists(f'{D}/phase3_pingpong.csv'):
+        p = pd.read_csv(f'{D}/phase3_pingpong.csv')
+        ref = p[p.work_us == 20000]
+        Pc = (ref.pp_cpu_naive_J / ref.pp_cpu_runtime_s).mean(); Pm = (ref.pp_mem_naive_J / ref.pp_mem_runtime_s).mean()
+        print(f'\nreference power (20 ms turns): pp_cpu {Pc:.3f} W, pp_mem {Pm:.3f} W')
+        p['truth_cpu_J'] = Pc * p.pp_cpu_runtime_s; p['truth_mem_J'] = Pm * p.pp_mem_runtime_s
+        p['naive_cpu_err_pct'] = 100 * (p.pp_cpu_naive_J / p.truth_cpu_J - 1); p['naive_mem_err_pct'] = 100 * (p.pp_mem_naive_J / p.truth_mem_J - 1)
+        p['naive_cpu_W'] = p.pp_cpu_naive_J / p.pp_cpu_runtime_s; p['naive_mem_W'] = p.pp_mem_naive_J / p.pp_mem_runtime_s
+        p['mean_interval_us'] = 1e6 * p.pp_cpu_runtime_s / p.pp_cpu_n
+        # time-proportional (equal-power) split of the busy energy
+        busy = p.pp_cpu_naive_J + p.pp_mem_naive_J
+        p['timesplit_cpu_err_pct'] = 100 * (busy * p.pp_cpu_runtime_s / (p.pp_cpu_runtime_s + p.pp_mem_runtime_s) / p.truth_cpu_J - 1)
+        p['cpu_zero_frac'] = p.pp_cpu_zero_dE_frac
+        p['ipc_cpu'] = p.pp_cpu_instr / p.pp_cpu_cycles; p['ipc_mem'] = p.pp_mem_instr / p.pp_mem_cycles
+        print('\n### ping-pong on one CPU\n' + table(p, 'work_us', ['mean_interval_us', 'cpu_zero_frac', 'naive_cpu_W', 'naive_mem_W', 'naive_cpu_err_pct', 'naive_mem_err_pct', 'timesplit_cpu_err_pct', 'ipc_cpu', 'ipc_mem']))
+    if os.path.exists(f'{D}/phase3_uncore.csv'):
+        u = pd.read_csv(f'{D}/phase3_uncore.csv')
+        # NOTE: true_uncore_W/pkg_W in the first run of phase3_uncore.csv were computed with an out-of-order bug
+        # (see phase3.py); use the window-based phase 2 measurement at the same n as the reference instead.
+        r2 = pd.read_csv(f'{D}/phase2_sumpkg.csv'); ref = r2[r2.workload != 'mem'].groupby('n').uncore_W.mean()
+        u['ref_uncore_W_phase2'] = u.n.map(ref); u['overcount_x'] = u.efs_uncore_W / u.ref_uncore_W_phase2
+        u = u[['rep', 'n', 'efs_uncore_W', 'ref_uncore_W_phase2', 'overcount_x', 'events']]
+        print('\n### EFS-style uncore vs true pkg - sum(core)\n' + table(u, 'n', ['efs_uncore_W', 'ref_uncore_W_phase2', 'overcount_x', 'events']))
+
 if __name__ == '__main__': globals()[sys.argv[1]]()
