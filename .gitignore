@@ -1,0 +1,10 @@
+# kernel module build products
+energy_kfunc_module/module/*.o
+energy_kfunc_module/module/*.ko
+energy_kfunc_module/module/*.mod
+energy_kfunc_module/module/*.mod.c
+energy_kfunc_module/module/.*.cmd
+energy_kfunc_module/module/Module.symvers
+energy_kfunc_module/module/modules.order
+experiments/bin/
+__pycache__/

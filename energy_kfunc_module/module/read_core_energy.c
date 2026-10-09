@@ -4,6 +4,16 @@
 #include <linux/bpf.h>
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
+#include <linux/version.h>
+
+/* Compat for kernels < 6.9/6.16 (e.g. Ubuntu 24.04's 6.8). */
+#ifndef BTF_KFUNCS_START
+#define BTF_KFUNCS_START(name) BTF_SET8_START(name)
+#define BTF_KFUNCS_END(name) BTF_SET8_END(name)
+#endif
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 16, 0)
+#define rdmsrq_safe rdmsrl_safe
+#endif
 
 // CPU CORE
 #define ENERGY_PWR_UNIT_MSR	0xC0010299
