@@ -8,3 +8,4 @@ energy_kfunc_module/module/Module.symvers
 energy_kfunc_module/module/modules.order
 experiments/bin/
 __pycache__/
+experiments/hsmp

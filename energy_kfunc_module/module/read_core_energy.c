@@ -44,6 +44,7 @@ struct energy_measurement {
 
 /* Declare the kfunc prototype */
 __bpf_kfunc void read_core_energy(struct energy_measurement* result);
+__bpf_kfunc u64 read_energy_raw(void);
 
 static void get_energy_units(void);
 
@@ -63,13 +64,25 @@ __visible noinline __bpf_kfunc void read_core_energy(struct energy_measurement* 
     rdmsrq_safe(INTEGRATED_GPU_MSR, &gpu);
     rdmsrq_safe(ENERGY_PKG_MSR, &package);
 
-    pr_info("KFUNC: before package=%llu\n", package);
 
     result->core_energy = div64_ul(core * 1000000UL, BIT(energy_units));
     result->dram_energy = div64_ul(dram * 1000000UL, BIT(energy_units));    
     result->gpu_energy = div64_ul(gpu * 1000000UL, BIT(energy_units));        
     result->package_energy = div64_ul(package * 1000000UL, BIT(energy_units));    
-    pr_info("KFUNC: after package=%llu\n", result->package_energy);
+    /* (removed two pr_info calls here: they fired on every context switch) */
+}
+
+/*
+ * Raw 32-bit RAPL counters of the calling CPU, no unit conversion:
+ * returns (package_raw << 32) | core_raw. Units are 2^-ESU J (ESU from 0xC0010299;
+ * ESU=16 on EPYC 9354P). Callers handle 32-bit wraparound with (u32)(cur - prev).
+ */
+__visible noinline __bpf_kfunc u64 read_energy_raw(void)
+{
+    u64 core = 0, package = 0;
+    rdmsrq_safe(ENERGY_CORE_MSR, &core);
+    rdmsrq_safe(ENERGY_PKG_MSR, &package);
+    return ((package & AMD_ENERGY_MASK) << 32) | (core & AMD_ENERGY_MASK);
 }
 
 /* End kfunc definitions */
@@ -78,6 +91,7 @@ __bpf_kfunc_end_defs();
 /* Define the BTF kfuncs ID set */
 BTF_KFUNCS_START(bpf_kfunc_example_ids_set)
 BTF_ID_FLAGS(func, read_core_energy)
+BTF_ID_FLAGS(func, read_energy_raw)
 BTF_KFUNCS_END(bpf_kfunc_example_ids_set)
 
 /* Register the kfunc ID set */
@@ -110,6 +124,13 @@ static int __init read_core_energy_init(void)
     if (ret)
     {
         pr_err("bpf_kfunc_example: Failed to register BTF kfunc ID set\n");
+        return ret;
+    }
+    /* Also allow tracing programs (e.g. tp_btf/sched_switch) so accounting can run without sched_ext. */
+    ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_TRACING, &bpf_kfunc_example_set);
+    if (ret)
+    {
+        pr_err("bpf_kfunc_example: Failed to register BTF kfunc ID set for TRACING\n");
         return ret;
     }
     get_energy_units();
